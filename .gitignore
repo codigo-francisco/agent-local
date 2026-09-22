@@ -1,0 +1,49 @@
+# --- Python ---------------------------------------------------------------
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- Binarios y modelos: se descargan y ocupan GB (ver README) ---------------
+bin/
+models/
+*.gguf
+*.gguf.part
+
+# --- Descargas e instaladores sueltos (zips de llama.cpp/cudart/llama-swap...) ---
+*.zip
+*.7z
+*.rar
+*.exe
+*.msi
+
+# --- Generado en tiempo de ejecución ---------------------------------------
+# llama-swap.yaml se regenera desde config/models.yaml al guardar o arrancar.
+generated/
+.nicegui/
+*.log
+
+# --- Configuración local de cada máquina ------------------------------------
+# Rutas, roles y parámetros ajustados a este hardware. Si no existe, la app la
+# crea con valores por defecto al arrancar (y «Recalcular» la adapta al equipo).
+config/models.yaml
+
+# --- Claude Code: preferencias personales (launch.json sí se versiona) ------
+.claude/settings.local.json
+
+# --- Editores y sistema operativo ------------------------------------------
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

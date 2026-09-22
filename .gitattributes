@@ -1,0 +1,11 @@
+# Normaliza saltos de línea: LF en el repositorio, lo nativo de cada sistema al hacer checkout.
+* text=auto
+
+# Los scripts de Windows necesitan CRLF para ejecutarse bien.
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+
+# Por si alguien los añade a mano: nunca intentar mezclarlos como texto.
+*.gguf binary
+*.zip binary
+*.exe binary

@@ -1,0 +1,155 @@
+# Catálogo de modelos recomendados. Puedes añadir los tuyos con el mismo formato.
+# arch: datos para estimar la VRAM de la KV cache antes de descargar (capas, cabezas KV, dim. por cabeza).
+# Si una descarga falla con 404, el nombre del archivo cambió en Hugging Face: abre la página del repo.
+# defaults: valores que se aplican al asignar el modelo a un rol (gpu_layers -1 = automático).
+models:
+  - id: qwen3.6-35b-a3b
+    name: Qwen3.6 35B-A3B (recomendado)
+    repo: unsloth/Qwen3.6-35B-A3B-GGUF
+    file: Qwen3.6-35B-A3B-UD-Q4_K_M.gguf
+    params: 35B (MoE, 3B activos)
+    quant: UD-Q4_K_M
+    size_gb: 22.1
+    role: main
+    tools: true
+    arch: {layers: 40, kv_heads: 2, head_dim: 256, attn_interval: 4, moe: true}
+    defaults: {ctx: 65536, gpu_layers: -1, extra_args: "--temp 0.6 --top-p 0.95 --top-k 20 --min-p 0"}
+    summary: >-
+      El más capaz para 16 GB. Mezcla de expertos: 35B de parámetros pero solo 3B activos por
+      token, así que es rápido aunque parte de los expertos vivan en la RAM (llama.cpp lo reparte
+      solo en modo automático). Usa herramientas de forma nativa y razona antes de actuar.
+      Su atención híbrida hace que el contexto cueste muy poca VRAM (64K ≈ 0,7 GB).
+    good_for: [agente principal, tareas de varios pasos, proyectos grandes]
+    license: Apache 2.0
+
+  - id: gpt-oss-20b
+    name: gpt-oss 20B (OpenAI)
+    repo: unsloth/gpt-oss-20b-GGUF
+    file: gpt-oss-20b-F16.gguf
+    params: 21B (MoE, 3.6B activos)
+    quant: MXFP4 (original)
+    size_gb: 13.8
+    role: main
+    tools: true
+    arch: {layers: 24, kv_heads: 8, head_dim: 64, moe: true}
+    defaults: {ctx: 32768, gpu_layers: 99, kv_type: f16}
+    summary: >-
+      Modelo abierto de OpenAI. Cabe entero en la GPU, es muy rápido, razona antes de responder
+      y usa herramientas de forma nativa. Muy sólido encontrando y arreglando bugs.
+    good_for: [agente principal, depuración, respuestas rápidas]
+    license: Apache 2.0
+
+  - id: qwen3.5-9b
+    name: Qwen3.5 9B
+    repo: unsloth/Qwen3.5-9B-GGUF
+    file: Qwen3.5-9B-UD-Q4_K_XL.gguf
+    params: 9B
+    quant: UD-Q4_K_XL
+    size_gb: 5.97
+    role: fast
+    tools: true
+    arch: {layers: 32, kv_heads: 4, head_dim: 256, attn_interval: 4}
+    defaults: {ctx: 32768, gpu_layers: 99}
+    summary: >-
+      Pequeño, moderno y estable, con herramientas nativas. Buen rol «fast» (resúmenes) o
+      principal ligero si quieres dejar la GPU libre para otras cosas.
+    good_for: [rol fast, agente ligero, contextos muy largos]
+    license: Apache 2.0
+
+  - id: qwen2.5-coder-14b
+    name: Qwen2.5-Coder 14B Instruct (antiguo)
+    repo: bartowski/Qwen2.5-Coder-14B-Instruct-GGUF
+    file: Qwen2.5-Coder-14B-Instruct-Q4_K_M.gguf
+    params: 14B
+    quant: Q4_K_M
+    size_gb: 8.99
+    role: main
+    tools: false
+    arch: {layers: 48, kv_heads: 8, head_dim: 128}
+    summary: >-
+      De finales de 2024. Buen código, pero NO usa las herramientas de forma nativa: escribe las
+      llamadas como texto y el agente tiene que rescatarlas, así que es menos fiable como agente.
+    good_for: [editar y depurar código, explicar código]
+    license: Apache 2.0
+
+  - id: qwen3-14b
+    name: Qwen3 14B
+    repo: unsloth/Qwen3-14B-GGUF
+    file: Qwen3-14B-Q4_K_M.gguf
+    params: 14B
+    quant: Q4_K_M
+    size_gb: 9.0
+    role: main
+    tools: true
+    arch: {layers: 40, kv_heads: 8, head_dim: 128}
+    summary: >-
+      Modelo generalista más reciente, con modo de "pensamiento" (razona antes de responder).
+      Mejor planificando tareas de varios pasos; algo más lento por el razonamiento.
+    good_for: [agente principal, tareas que requieren planificar, preguntas generales]
+    license: Apache 2.0
+
+  - id: qwen3-coder-30b-a3b
+    name: Qwen3-Coder 30B-A3B Instruct (avanzado)
+    repo: unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF
+    file: Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
+    params: 30B (MoE, 3B activos)
+    quant: Q4_K_M
+    size_gb: 18.6
+    role: main
+    tools: true
+    arch: {layers: 48, kv_heads: 4, head_dim: 128}
+    summary: >-
+      Mezcla de expertos: 30B de parámetros pero solo 3B activos por token, así que es rápido.
+      NO cabe entero en 16 GB: añade en «args extra» `--n-cpu-moe 20` (o similar) para dejar parte
+      de los expertos en la RAM. Más capaz que los de 14B en tareas de agente.
+    good_for: [agente principal si tienes RAM de sobra, proyectos grandes]
+    license: Apache 2.0
+
+  - id: qwen2.5-coder-7b
+    name: Qwen2.5-Coder 7B Instruct
+    repo: bartowski/Qwen2.5-Coder-7B-Instruct-GGUF
+    file: Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf
+    params: 7B
+    quant: Q4_K_M
+    size_gb: 4.68
+    role: main
+    tools: true
+    arch: {layers: 28, kv_heads: 4, head_dim: 128}
+    summary: >-
+      Versión ligera: rápido y con mucho contexto disponible. Válido como principal en GPUs
+      de 8 GB, o como «fast» de lujo en la tuya.
+    good_for: [GPUs de 8 GB, respuestas rápidas, resúmenes]
+    license: Apache 2.0
+
+  - id: qwen2.5-coder-3b
+    name: Qwen2.5-Coder 3B Instruct
+    repo: bartowski/Qwen2.5-Coder-3B-Instruct-GGUF
+    file: Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf
+    params: 3B
+    quant: Q4_K_M
+    size_gb: 1.93
+    role: fast
+    tools: false
+    arch: {layers: 36, kv_heads: 2, head_dim: 128}
+    summary: >-
+      Pequeño y muy rápido. Se usa para tareas auxiliares: resumir conversaciones antiguas
+      cuando el contexto se llena. No es fiable como agente principal.
+    good_for: [rol fast, resúmenes de contexto]
+    license: Qwen Research
+
+  - id: qwen2.5-coder-0.5b
+    name: Qwen2.5-Coder 0.5B Instruct (borrador)
+    repo: bartowski/Qwen2.5-Coder-0.5B-Instruct-GGUF
+    file: Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf
+    params: 0.5B
+    quant: Q8_0
+    size_gb: 0.53
+    role: draft
+    tools: false
+    arch: {layers: 24, kv_heads: 2, head_dim: 64}
+    summary: >-
+      Modelo borrador para decodificación especulativa: propone varios tokens que el modelo
+      principal verifica de una vez. Acelera la generación de Qwen2.5-Coder (misma familia y
+      vocabulario). Solo sirve con modelos principales de la familia Qwen2.5.
+    good_for: [rol draft junto a Qwen2.5-Coder 7B/14B]
+    license: Apache 2.0

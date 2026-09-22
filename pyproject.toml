@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-local"
+version = "0.1.0"
+description = "Agente de programación 100% local (llama.cpp + llama-swap) con GUI"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.40",
+    "httpx>=0.27",
+    "nicegui>=2.0",
+    "pywebview>=5.0",
+    "pyyaml>=6.0",
+    "gguf>=0.10",
+    "rich>=13.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+agent = "agent.cli:main"
+agent-gui = "agent.gui.app:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*"]
+
+[tool.setuptools.package-data]
+agent = ["gui/*.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
