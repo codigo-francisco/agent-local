@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "codebase-memory": {
+      "command": "bin/codebase-memory-mcp/codebase-memory-mcp.exe",
+      "args": []
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/Documentos"],
+      "disabled": true
+    },
+    "remoto": {
+      "url": "https://ejemplo.com/mcp",
+      "headers": { "Authorization": "Bearer TU_TOKEN" },
+      "disabled": true
+    }
+  }
+}

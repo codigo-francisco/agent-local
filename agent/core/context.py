@@ -288,6 +288,43 @@ class ContextManager:
                            f"en el contexto.".replace(",", "."))
 
 
+MISSING_RESULT = "[sin resultado: la ejecución se interrumpió antes de terminar]"
+
+
+def repair_history(history: list[dict]) -> tuple[list[dict], int]:
+    """Garantiza el invariante que exigen las plantillas de chat: cada `tool_call` de un mensaje
+    assistant va seguida de su mensaje `tool`, y no hay mensajes `tool` sueltos. Si una tarea se
+    cortó a mitad (excepción, cierre), el historial podía quedar roto y el servidor respondería con
+    un 400 críptico en el siguiente turno. Devuelve (historial reparado, nº de arreglos)."""
+    out: list[dict] = []
+    fixes = 0
+    pending: list[str] = []  # ids de llamadas del último assistant aún sin resultado
+
+    def close_pending() -> None:
+        nonlocal fixes
+        for cid in pending:
+            out.append({"role": "tool", "tool_call_id": cid, "content": MISSING_RESULT})
+            fixes += 1
+        pending.clear()
+
+    for m in history:
+        role = m.get("role")
+        if role == "tool":
+            cid = m.get("tool_call_id")
+            if cid in pending:
+                pending.remove(cid)
+                out.append(m)
+            else:
+                fixes += 1  # huérfano o duplicado: fuera
+            continue
+        close_pending()
+        out.append(m)
+        if role == "assistant":
+            pending = [tc.get("id") for tc in m.get("tool_calls") or []]
+    close_pending()
+    return out, fixes
+
+
 def truncate_middle(text: str, target: int) -> str:
     head = int(target * 0.6)
     tail = max(0, target - head)

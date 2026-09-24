@@ -4,7 +4,7 @@ import asyncio
 
 from agent.config import AppConfig, ModelEntry
 from agent.core.errors import ContextOverflowFromServer, ServerUnavailable
-from agent.core.events import AgentError, Done, Notice, ToolRequest, ToolResult
+from agent.core.events import AgentError, Done, FilesChanged, Notice, ToolRequest, ToolResult
 from agent.core.llm import ChatResult, ToolCall
 from agent.core.loop import Agent, extract_text_tool_calls
 
@@ -27,6 +27,7 @@ class FakeLLM:
     async def chat(self, model, messages, tools=None, max_tokens=4096, on_text=None,
                    on_reasoning=None, cancel=None):
         self.calls.append(messages)
+        self.tools_seen = tools or []
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -47,6 +48,8 @@ def make_agent(tmp_path, script, approve_answer="yes", n_ctx=8192, confirm="ask"
 
     llm = FakeLLM(script, n_ctx)
     agent = Agent(cfg, llm, events.append, approve)
+    # Aquí se prueba el bucle, no la shell: abrir PowerShell cuesta ~1 s por comando.
+    agent.toolbox.tool_run_command = lambda command, timeout=None: f"exit code: 0\n--- stdout ---\n{command}"
     return agent, llm, events
 
 
@@ -86,6 +89,50 @@ def test_tool_rejected_is_not_executed(tmp_path):
     asyncio.run(agent.run("ejecuta algo"))
     res = next(e for e in events if isinstance(e, ToolResult))
     assert not res.ok and "rechazó" in res.output
+
+
+def _asked_agent(tmp_path, script, answer):
+    """Agente que registra por qué herramientas se le preguntó al usuario."""
+    agent, llm, events = make_agent(tmp_path, script)
+    asked = []
+
+    async def approve(req):
+        asked.append(req.name)
+        return answer
+
+    agent.approve = approve
+    return agent, asked
+
+
+def test_approve_session_is_per_tool_and_not_saved(tmp_path):
+    agent, asked = _asked_agent(tmp_path, [
+        call("run_command", '{"command": "echo 1"}', cid="a"),
+        call("run_command", '{"command": "echo 2"}', cid="b"),
+        call("write_file", '{"path": "x.txt", "content": "hola"}', cid="c"),
+        text("listo"),
+    ], "session")
+    asyncio.run(agent.run("haz cosas"))
+    assert asked == ["run_command", "write_file"]  # el 2º run_command ya no pregunta
+    assert agent.session_allowed == {"run_command", "write_file"}
+    assert agent.cfg.always_allow == []
+
+
+def test_approve_always_is_saved_and_revocable(tmp_path):
+    agent, asked = _asked_agent(tmp_path, [
+        call("run_command", '{"command": "echo 1"}', cid="a"),
+        text("listo"),
+    ], "always")
+    saved = []
+    agent.persist = lambda: saved.append(list(agent.cfg.always_allow))
+    asyncio.run(agent.run("haz cosas"))
+    assert agent.cfg.always_allow == ["run_command"] and saved == [["run_command"]]
+    # un agente nuevo con la misma config (p. ej. tras reiniciar) no vuelve a preguntar
+    agent2, asked2 = _asked_agent(tmp_path, [call("run_command", '{"command": "echo 2"}'), text("ok")], "no")
+    agent2.cfg = agent.cfg
+    asyncio.run(agent2.run("otra vez"))
+    assert asked2 == []
+    agent.cfg.always_allow.remove("run_command")  # quitar el permiso: vuelve a preguntar
+    assert not agent2.is_allowed("run_command")
 
 
 def test_invalid_json_arguments_go_back_to_model(tmp_path):
@@ -153,10 +200,89 @@ def test_truncated_text_continues_once(tmp_path):
 
 
 def test_server_unavailable_is_explained(tmp_path):
-    agent, llm, events = make_agent(tmp_path, [ServerUnavailable("http://127.0.0.1:8080/v1")])
+    agent, llm, events = make_agent(tmp_path, [ServerUnavailable("http://127.0.0.1:8080/v1"),
+                                               ServerUnavailable("http://127.0.0.1:8080/v1")])
+    agent.retry_delay = 0
     asyncio.run(agent.run("hola"))
     err = next(e for e in events if isinstance(e, AgentError))
     assert err.action == "server" and events[-1].reason == "error"
+    assert len(llm.calls) == 2  # un reintento y se rinde
+
+
+def test_server_unavailable_retries_once(tmp_path):
+    agent, llm, events = make_agent(tmp_path, [ServerUnavailable("http://127.0.0.1:8080/v1"),
+                                               text("ya estoy")])
+    agent.retry_delay = 0
+    asyncio.run(agent.run("hola"))
+    assert any(isinstance(e, Notice) and "reintento" in e.text for e in events)
+    assert events[-1].reason == "ok"
+
+
+def test_repeated_identical_call_is_stopped(tmp_path):
+    script = [call("read_file", '{"path": "calc.py"}', cid=f"c{i}") for i in range(6)]
+    agent, llm, events = make_agent(tmp_path, script)
+    asyncio.run(agent.run("lee"))
+    assert any(isinstance(e, Notice) and "cambie de enfoque" in e.text for e in events)
+    assert events[-1].reason == "loop" and len(llm.calls) == 4
+
+
+def test_undo_restores_files_of_the_turn(tmp_path):
+    agent, llm, events = make_agent(tmp_path, [
+        call("edit_file", '{"path": "calc.py", "old": "a - b", "new": "a + b"}', cid="a"),
+        call("write_file", '{"path": "nuevo.txt", "content": "hola"}', cid="b"),
+        text("hecho"),
+    ])
+    agent.checkpoints_dir = tmp_path / ".cp"
+    original = (tmp_path / "calc.py").read_bytes()
+    asyncio.run(agent.run("cambia cosas"))
+    changed = next(e for e in events if isinstance(e, FilesChanged))
+    assert sorted(changed.files) == ["calc.py", "nuevo.txt"]
+    # Otro agente (como tras reiniciar la app) puede deshacerlo desde disco.
+    other = tmp_path / "otro"
+    other.mkdir()
+    agent2, _, _ = make_agent(other, [])
+    agent2.checkpoints_dir = tmp_path / ".cp"
+    report = agent2.undo(changed.checkpoint_id)
+    assert "restaurados: calc.py" in report and "nuevo.txt" in report
+    assert (tmp_path / "calc.py").read_bytes() == original and not (tmp_path / "nuevo.txt").exists()
+
+
+def test_undo_skips_files_changed_afterwards(tmp_path):
+    agent, llm, events = make_agent(tmp_path, [
+        call("edit_file", '{"path": "calc.py", "old": "a - b", "new": "a + b"}'), text("hecho")])
+    asyncio.run(agent.run("arregla"))
+    (tmp_path / "calc.py").write_text("lo edité yo\n", encoding="utf-8")
+    cid = next(e for e in events if isinstance(e, FilesChanged)).checkpoint_id
+    assert "cambiaron después: calc.py" in agent.undo(cid)
+    assert (tmp_path / "calc.py").read_text(encoding="utf-8") == "lo edité yo\n"
+
+
+def test_exception_mid_tools_leaves_valid_history(tmp_path):
+    agent, llm, events = make_agent(tmp_path, [
+        ChatResult(tool_calls=[ToolCall("a", "run_command", '{"command": "echo 1"}'),
+                               ToolCall("b", "run_command", '{"command": "echo 2"}')],
+                   finish_reason="tool_calls")])
+
+    async def broken_approve(req):
+        raise RuntimeError("la ventana se cerró")
+
+    agent.approve = broken_approve
+    asyncio.run(agent.run("haz algo"))
+    assert events[-1].reason == "error"
+    ids = [m["tool_call_id"] for m in agent.history if m["role"] == "tool"]
+    assert ids == ["a", "b"]  # cada llamada tiene su resultado aunque se cortara
+
+
+def test_session_is_saved_and_restored(tmp_path):
+    from agent.core import sessions
+    agent, llm, events = make_agent(tmp_path, [text("hola, ¿qué tal?")])
+    agent.sessions_dir = tmp_path / ".sessions"
+    asyncio.run(agent.run("saluda"))
+    saved = sessions.latest(tmp_path / ".sessions", tmp_path)
+    assert saved and saved.title == "saluda" and saved.history[-1]["content"] == "hola, ¿qué tal?"
+    agent2, _, _ = make_agent(tmp_path, [])
+    agent2.restore(saved)
+    assert agent2.history == agent.history and agent2.session_id == agent.session_id
 
 
 def test_unexpected_exception_never_escapes(tmp_path):

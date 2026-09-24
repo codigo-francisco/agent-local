@@ -15,10 +15,11 @@ dependencies = [
     "pyyaml>=6.0",
     "gguf>=0.10",
     "rich>=13.0",
+    "mcp>=2.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "ruff>=0.6"]
 
 [project.scripts]
 agent = "agent.cli:main"
@@ -32,4 +33,18 @@ agent = ["gui/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = [".", "tests"]
+# `pytest` a secas corre solo los rápidos; `pytest -m "slow or not slow"` corre todo.
+markers = ["slow: arranca procesos externos (PowerShell, servidores MCP)"]
+addopts = "-m 'not slow' --durations=5"
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+# Errores reales (F), bugs probables (B), asyncio (ASYNC) y excepciones tragadas en silencio.
+select = ["E", "F", "W", "B", "ASYNC", "BLE", "PLE"]
+# E741: `l` en comprensiones cortas es legible aquí. ASYNC109/230/240: operaciones de disco
+# diminutas (exists, mkdir, abrir un archivo) que no bloquean de forma apreciable.
+ignore = ["E501", "E731", "B008", "E741", "ASYNC109", "ASYNC230", "ASYNC240"]

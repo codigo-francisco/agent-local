@@ -1,15 +1,25 @@
 # --- Python ---------------------------------------------------------------
 .venv/
 venv/
+env/
 __pycache__/
 *.py[cod]
 *.egg-info/
+.eggs/
 build/
 dist/
+pip-wheel-metadata/
+
+# --- Tests, linters y cobertura ---------------------------------------------
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.hypothesis/
+.tox/
+.nox/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
 # --- Binarios y modelos: se descargan y ocupan GB (ver README) ---------------
@@ -18,7 +28,8 @@ models/
 *.gguf
 *.gguf.part
 
-# --- Descargas e instaladores sueltos (zips de llama.cpp/cudart/llama-swap...) ---
+# --- Descargas e instaladores sueltos (zips de llama.cpp/cudart/llama-swap,
+#     paquete rpc-worker.zip para la segunda PC...) ------------------------------
 *.zip
 *.7z
 *.rar
@@ -26,24 +37,51 @@ models/
 *.msi
 
 # --- Generado en tiempo de ejecución ---------------------------------------
-# llama-swap.yaml se regenera desde config/models.yaml al guardar o arrancar.
+# llama-swap.yaml, conversaciones, puntos de restauración, logs, caché de GGUF y
+# recomendaciones: todo se regenera o es propio de cada máquina.
 generated/
 .nicegui/
 *.log
+# Temporales de la escritura atómica (config.atomic_write) si la app se cierra a mitad.
+*.tmp
 
 # --- Configuración local de cada máquina ------------------------------------
-# Rutas, roles y parámetros ajustados a este hardware. Si no existe, la app la
-# crea con valores por defecto al arrancar (y «Recalcular» la adapta al equipo).
+# Rutas, roles, PCs remotas y parámetros ajustados a este hardware. Si no existe,
+# la app la crea con valores por defecto al arrancar («Recalcular» la adapta).
 config/models.yaml
+# Copias de seguridad de un models.yaml dañado (models.yaml.bak-<fecha>).
+config/*.bak-*
+# Servidores MCP: puede contener tokens de acceso (ver config/mcp.example.json).
+config/mcp.json
 
-# --- Claude Code: preferencias personales (launch.json sí se versiona) ------
+# --- Secretos y datos personales ------------------------------------------------
+.env
+.env.*
+!.env.example
+# Conversaciones exportadas desde el chat: pueden contener código o datos privados.
+*.chat.json
+
+# --- Herramientas de IA ---------------------------------------------------------
+# Claude Code: preferencias personales y worktrees (launch.json sí se versiona).
 .claude/settings.local.json
+.claude/worktrees/
+# Índice local de codebase-memory-mcp.
+.codebase-memory/
+
+# --- Restos de git ------------------------------------------------------------
+/FETCH_HEAD
+/ORIG_HEAD
+*.orig
+*.rej
 
 # --- Editores y sistema operativo ------------------------------------------
 .vscode/
 .idea/
+.vs/
 *.swp
 *~
 .DS_Store
 Thumbs.db
+ehthumbs.db
 desktop.ini
+$RECYCLE.BIN/

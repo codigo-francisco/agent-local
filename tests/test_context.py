@@ -75,7 +75,7 @@ def test_stage2_without_summarizer_drops_with_note():
 
     cm = make_cm(n_ctx=1200, summarizer=broken)
     history = []
-    for i in range(6):
+    for _ in range(6):
         history += [{"role": "user", "content": "u" * 200}, {"role": "assistant", "content": "a" * 200}]
     history.append({"role": "user", "content": "actual"})
     res = run(cm.fit(history, None, None))

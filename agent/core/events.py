@@ -63,7 +63,15 @@ class AgentError:
 
 @dataclass
 class Done:
-    reason: str  # ok | cancelled | error | context | max_steps
+    reason: str  # ok | cancelled | error | context | max_steps | loop
 
 
-Event = TextDelta | TextRewrite | ReasoningDelta | ToolRequest | ToolResult | ContextUsage | Notice | AgentError | Done
+@dataclass
+class FilesChanged:
+    """Tras el turno: archivos que escribió el agente y el checkpoint para deshacerlos."""
+    checkpoint_id: str
+    files: list[str]
+
+
+Event = (TextDelta | TextRewrite | ReasoningDelta | ToolRequest | ToolResult | ContextUsage | Notice
+         | AgentError | Done | FilesChanged)

@@ -2,9 +2,22 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 from nicegui import app, ui
 
 from .state import AppState
+
+
+def open_folder(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(path)  # noqa: S606
+    else:
+        subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(path)])
 
 
 def workspace_picker(state: AppState, label: str = "Carpeta del proyecto (workspace)") -> ui.input:

@@ -28,7 +28,7 @@ def test_plan_auto_offloads_moe_to_ram():
                                        gpu_layers=-1)])
     plan = vram.plan_usage(cfg, load_catalog(), gpu)
     assert plan.fits and plan.ram_offload_gb > 4
-    assert "expertos MoE en RAM" in plan.models[0].note
+    assert "MoE" in plan.models[0].note and "RAM" in plan.models[0].note
     cfg.models[0].gpu_layers = 99  # sin modo automático: no cabe
     assert vram.plan_usage(cfg, load_catalog(), gpu).fits is False
 
@@ -63,7 +63,7 @@ def test_plan_too_big_gives_suggestions():
     plan = vram.plan_usage(cfg_two_models(kv="f16", main_ctx=131072), load_catalog(), gpu)
     assert plan.fits is False
     text = " ".join(plan.suggestions)
-    assert "contexto máximo" in text and "q8_0" in text
+    assert "Baja el contexto" in text and "q8_0" in text
 
 
 def test_ctx_hint_mentions_vram():
@@ -96,3 +96,25 @@ def test_swap_config_skips_missing_files(tmp_path, monkeypatch):
     data, warnings = swapconfig.build(cfg_two_models())
     assert data["models"] == {}
     assert any("falta el archivo" in w for w in warnings)
+
+
+def test_ram_limit_defaults_to_90_percent_and_is_configurable():
+    assert AppConfig().ram_limit_pct == 90
+    cfg = AppConfig()
+    assert vram.ram_budget_gb(cfg, ram=64.0) == 57.6
+    cfg.ram_limit_pct = 50
+    assert vram.ram_budget_gb(cfg, ram=64.0) == 32.0
+
+
+def test_offload_over_ram_limit_does_not_fit(monkeypatch):
+    gpu = GPUInfo("RTX 4070 Ti SUPER", 16.0, 1.0, 15.0, "x")
+    cfg = AppConfig(roles={"main": "qwen3.6-35b-a3b", "fast": "", "draft": ""},
+                    models=[ModelEntry("qwen3.6-35b-a3b", "Qwen3.6-35B-A3B-UD-Q4_K_M.gguf", ctx=65536,
+                                       gpu_layers=-1)])
+    monkeypatch.setattr(vram, "ram_total_gb", lambda: 64.0)
+    assert vram.plan_usage(cfg, load_catalog(), gpu).fits  # ~5 GB a RAM, límite 57,6 GB
+    monkeypatch.setattr(vram, "ram_total_gb", lambda: 8.0)
+    cfg.ram_limit_pct = 10  # 0,8 GB permitidos
+    plan = vram.plan_usage(cfg, load_catalog(), gpu)
+    assert plan.fits is False and not plan.ram_ok
+    assert any("límite de RAM" in s for s in plan.suggestions)

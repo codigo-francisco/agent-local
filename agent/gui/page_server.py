@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from nicegui import run, ui
 
-from ..server import vram
+from ..log import LOG_DIR
+from ..server import rpc, vram
 from ..server.manager import ServerError
 from .state import AppState
-
+from .widgets import open_folder
 
 def build(state: AppState) -> None:
     cfg = state.cfg
@@ -28,6 +29,11 @@ def build(state: AppState) -> None:
             vram_label = ui.label().classes("text-sm text-gray-500")
         vram_bar = ui.linear_progress(value=0, show_value=False).classes("w-full")
         running_label = ui.label().classes("text-sm")
+        remote_label = ui.label().classes("text-sm")
+        with ui.row().classes("items-center no-wrap w-full text-negative") as crash_row:
+            ui.icon("report", color="negative")
+            crash_label = ui.label().classes("text-sm")
+        crash_row.set_visibility(False)
         with ui.row():
             start_btn = ui.button("Arrancar", icon="play_arrow")
             stop_btn = ui.button("Parar", icon="stop", color="negative")
@@ -36,7 +42,12 @@ def build(state: AppState) -> None:
             unload_btn = ui.button("Liberar VRAM", icon="eject").props("flat") \
                 .tooltip("Descarga todos los modelos de la GPU sin parar el servidor")
 
-    ui.label("Registro").classes("text-lg font-semibold mt-2")
+    with ui.row().classes("items-center w-full mt-2"):
+        ui.label("Registro").classes("text-lg font-semibold")
+        ui.space()
+        ui.button("Abrir carpeta de logs", icon="folder_open",
+                  on_click=lambda: open_folder(LOG_DIR)).props("flat dense") \
+            .tooltip("Registro de la app (agent.log) y de los servidores MCP, para diagnosticar fallos")
     log = ui.log(max_lines=2000).classes("w-full h-96 font-mono text-xs")
 
     def do_start() -> None:
@@ -98,6 +109,8 @@ def build(state: AppState) -> None:
         else:
             status_icon.props("color=grey")
             status_label.set_text("Parado")
+        crash_row.set_visibility(bool(state.manager.crashed))
+        crash_label.set_text(state.manager.crashed or "")
         running = [f"{r.get('model')} ({r.get('state', '?')})" for r in info["running"]]
         running_label.set_text("Cargados en GPU: " + (", ".join(running) if running else "ninguno"))
         start_btn.set_enabled(not own and not info["reachable"])
@@ -108,5 +121,19 @@ def build(state: AppState) -> None:
             vram_bar.set_value(gpu.used_gb / gpu.total_gb)
             vram_label.set_text(f"VRAM: {gpu.used_gb:.1f} / {gpu.total_gb:.1f} GB")
 
+    async def poll_remote() -> None:
+        # Lento a propósito: el trabajador RPC atiende a un cliente a la vez y encola el resto.
+        workers = [w for w in cfg.rpc_workers if w.enabled]
+        remote_label.set_visibility(bool(workers))
+        if not workers:
+            return
+        states = []
+        for w in workers:
+            ok = await run.io_bound(rpc.reachable, w.host, w.port)
+            states.append(f"{w.name or w.endpoint} {'conectada' if ok else 'NO responde'}")
+        remote_label.set_text("PCs remotas: " + ", ".join(states))
+
     ui.timer(0.5, pull_log)
     ui.timer(3.0, poll_status)
+    ui.timer(0.5, poll_remote, once=True)
+    ui.timer(30.0, poll_remote)

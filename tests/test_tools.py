@@ -69,6 +69,7 @@ def test_unknown_tool_and_bad_args(tb):
     assert not ok and "argumentos inválidos" in out
 
 
+@pytest.mark.slow
 def test_run_command(tb):
     ok, out = tb.execute("run_command", {"command": "echo hola"})
     assert ok and "exit code: 0" in out and "hola" in out
@@ -77,6 +78,65 @@ def test_run_command(tb):
 def test_preview_diff(tb):
     diff = tb.preview("edit_file", {"path": "src/calc.py", "old": "a - b", "new": "a + b"})
     assert "-    return a - b" in diff and "+    return a + b" in diff
+
+
+def test_edit_preserves_cp1252_bytes(tb, tmp_path):
+    # Antes se leía con errors="replace" y cada «ñ» del archivo acababa como � en disco.
+    p = tmp_path / "viejo.bat"
+    original = "rem Configuración del año\r\necho niño\r\n".encode("cp1252")
+    p.write_bytes(original)
+    ok, out = tb.execute("read_file", {"path": "viejo.bat"})
+    assert ok and "Configuración" in out
+    ok, out = tb.execute("edit_file", {"path": "viejo.bat", "old": "echo niño", "new": "echo niña"})
+    assert ok, out
+    assert p.read_bytes() == original.replace("niño".encode("cp1252"), "niña".encode("cp1252"))
+
+
+def test_edit_keeps_utf8_bom(tb, tmp_path):
+    p = tmp_path / "bom.txt"
+    p.write_bytes(b"\xef\xbb\xbfhola\n")
+    ok, _ = tb.execute("edit_file", {"path": "bom.txt", "old": "hola", "new": "adiós"})
+    assert ok and p.read_bytes() == b"\xef\xbb\xbf" + "adiós\n".encode("utf-8")
+
+
+def test_non_representable_text_switches_to_utf8(tb, tmp_path):
+    p = tmp_path / "latin.txt"
+    p.write_bytes("año\n".encode("cp1252"))
+    ok, out = tb.execute("edit_file", {"path": "latin.txt", "old": "año", "new": "año 🚀"})
+    assert ok and "UTF-8" in out
+    assert p.read_text(encoding="utf-8") == "año 🚀\n"  # sin pérdida
+
+
+def test_write_is_atomic_and_leaves_no_temp_files(tb, tmp_path):
+    ok, _ = tb.execute("write_file", {"path": "a/b.txt", "content": "x"})
+    assert ok and sorted(f.name for f in (tmp_path / "a").iterdir()) == ["b.txt"]
+
+
+@pytest.mark.slow
+def test_run_command_can_be_cancelled(tb):
+    import threading
+    import time
+    stop = threading.Event()
+    threading.Timer(0.5, stop.set).start()
+    cmd = "Start-Sleep 30" if __import__("os").name == "nt" else "sleep 30"
+    t0 = time.monotonic()
+    ok, out = tb.execute("run_command", {"command": cmd}, should_stop=stop.is_set)
+    assert time.monotonic() - t0 < 10 and "Detenido por el usuario" in out
+
+
+def test_run_command_timeout_is_capped_and_validated(tb):
+    ok, out = tb.execute("run_command", {"command": "echo x", "timeout": "mucho"})
+    assert not ok and "timeout" in out
+
+
+@pytest.mark.slow
+def test_run_command_huge_output_is_bounded(tb):
+    # Una sola cadena de 3 MB (sin bucles: un ForEach-Object de 200.000 líneas tardaba muchísimo).
+    cmd = ("('x' * 3000000) + 'FIN'" if __import__("os").name == "nt"
+           else "head -c 3000000 /dev/zero | tr '\\0' x; echo FIN")
+    ok, out = tb.execute("run_command", {"command": cmd, "timeout": 60})
+    assert ok and "exit code: 0" in out and len(out) <= tb.max_output + 500
+    assert "FIN" in out and "se omitieron" in out  # el final se conserva, el medio no
 
 
 def test_clip_keeps_head_and_tail():

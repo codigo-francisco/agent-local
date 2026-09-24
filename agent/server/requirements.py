@@ -107,7 +107,7 @@ def check_llama_server() -> Check:
     if not devices:
         # ggml-cuda.dll existe pero no carga: casi siempre faltan las DLLs de su versión de CUDA.
         missing = [d for d in _cuda_dll_deps(cuda_dll) if not (exe.parent / d).exists()]
-        detail = (f"llama.cpp no detecta la GPU: ggml-cuda.dll no se puede cargar"
+        detail = ("llama.cpp no detecta la GPU: ggml-cuda.dll no se puede cargar"
                   + (f" porque faltan {', '.join(missing)}." if missing else "."))
         major = next((re.search(r"64_(\d+)", d).group(1) for d in missing if re.search(r"64_(\d+)", d)), None)
         fix = (f"Tu build de llama.cpp es para CUDA {major}: descarga de la MISMA release el zip "

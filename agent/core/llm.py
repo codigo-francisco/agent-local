@@ -61,16 +61,56 @@ class ChatResult:
     cancelled: bool = False
 
 
+STREAM_IDLE_TIMEOUT = 180.0  # s sin recibir nada a mitad de una respuesta -> servidor colgado
+
+
+class _Stalled(Exception):
+    pass
+
+
+async def race(aw: Awaitable, cancel: asyncio.Event | None, timeout: float | None):
+    """Espera `aw`, pero vuelve antes si se pulsa «Detener» o pasan `timeout` segundos.
+    Devuelve (cancelado, resultado); lanza _Stalled si venció el tiempo."""
+    task = asyncio.ensure_future(aw)
+    waiter = asyncio.ensure_future(cancel.wait()) if cancel is not None else None
+    try:
+        done, _ = await asyncio.wait({task, waiter} - {None}, timeout=timeout,
+                                     return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        task.cancel()
+        raise
+    finally:
+        if waiter is not None:
+            waiter.cancel()
+    if task in done:
+        return False, task.result()
+    task.cancel()
+    try:
+        await task
+    except BaseException:  # noqa: BLE001 - solo queremos que termine
+        pass
+    if waiter is not None and waiter in done:
+        return True, None
+    raise _Stalled()
+
+
 class LLMClient:
-    def __init__(self, endpoint: str, log_provider: Callable[[], str] | None = None):
+    def __init__(self, endpoint: str, log_provider: Callable[[], str] | None = None,
+                 transport: httpx.AsyncBaseTransport | None = None):
         self.endpoint = endpoint.rstrip("/")
         self.root = self.endpoint[:-3] if self.endpoint.endswith("/v1") else self.endpoint
         self.log_provider = log_provider
+        self.idle_timeout = STREAM_IDLE_TIMEOUT
+        # `transport` permite a los tests simular un servidor que falla de mil maneras.
         self.client = openai.AsyncOpenAI(
             base_url=self.endpoint, api_key="local", max_retries=0,
             timeout=900.0,  # cargar un modelo grande tarda
+            http_client=httpx.AsyncClient(transport=transport, timeout=900.0) if transport else None,
         )
-        self._http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=3.0))
+        self._http = httpx.AsyncClient(timeout=httpx.Timeout(300.0, connect=3.0), transport=transport)
+        self.active = 0  # peticiones de chat en curso (ver close_when_idle)
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     # --- utilidades del servidor ----------------------------------------
     async def list_models(self) -> list[str]:
@@ -165,12 +205,26 @@ class LLMClient:
                         "stream": True, "stream_options": {"include_usage": True}}
         if tools:
             kwargs["tools"] = tools
+        stream = None
+        first = True  # aún no llegó ningún trozo
+        self.active += 1
+        self._idle.clear()
         try:
-            stream = await self.client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                if cancel is not None and cancel.is_set():
+            # Mientras el modelo se carga no llega nada: «Detener» debe funcionar igualmente.
+            cancelled, stream = await race(self.client.chat.completions.create(**kwargs), cancel, None)
+            if cancelled:
+                result.cancelled = True
+                return result
+            chunks = stream.__aiter__()
+            while True:
+                try:
+                    cancelled, chunk = await race(chunks.__anext__(), cancel,
+                                                   None if first else self.idle_timeout)
+                except StopAsyncIteration:
+                    break
+                first = False
+                if cancelled or (cancel is not None and cancel.is_set()):
                     result.cancelled = True
-                    await stream.close()
                     break
                 if getattr(chunk, "usage", None):
                     result.prompt_tokens = chunk.usage.prompt_tokens
@@ -201,14 +255,49 @@ class LLMClient:
                             slot["name"] = tc.function.name
                         if tc.function.arguments:
                             slot["arguments"] += tc.function.arguments
-        except (openai.APIError, openai.APIConnectionError) as e:
+        except openai.APIConnectionError as e:
+            # Si ya llegaron trozos no es que no haya servidor: se cortó a mitad. Distinguirlo
+            # evita el mensaje «no hay nada escuchando» y un reintento que duplicaría el texto.
+            if not first:
+                raise self._cut(model, e) from e
             raise self._translate(model, e) from e
+        except openai.APIError as e:
+            raise self._translate(model, e) from e
+        except _Stalled as e:
+            raise AgentFailure(
+                "El modelo dejó de responder",
+                f"No llegó nada del servidor en {self.idle_timeout:.0f} s a mitad de la respuesta.",
+                ["Revisa en «Servidor» si llama-server sigue vivo o se quedó sin memoria.",
+                 "Vuelve a enviar el mensaje o escribe «continúa»."], action="server") from e
+        except httpx.HTTPError as e:  # la conexión se cortó a mitad del stream
+            raise self._cut(model, e) from e
+        finally:
+            self.active -= 1
+            if self.active == 0:
+                self._idle.set()
+            if stream is not None:
+                try:
+                    await stream.close()
+                except Exception:  # noqa: BLE001
+                    pass
         for idx in sorted(slots):
             s = slots[idx]
             if s["name"]:
                 result.tool_calls.append(
                     ToolCall(s["id"] or f"call_{idx}_{uuid.uuid4().hex[:8]}", s["name"], s["arguments"]))
         return result
+
+    def _cut(self, model: str, e: Exception) -> AgentFailure:
+        """La conexión se cayó a mitad de la respuesta (llama-server murió, p. ej. sin memoria)."""
+        logs = self.log_provider() if self.log_provider else ""
+        if is_oom(logs):
+            return ModelLoadFailed(model, (str(e) + "\n\n" + logs[-3000:]).strip(), out_of_memory=True)
+        return AgentFailure(
+            "Se cortó la conexión con el modelo",
+            "El servidor cerró la conexión a mitad de la respuesta (¿se cayó llama-server?).",
+            ["Revisa el registro en la página «Servidor».",
+             "Vuelve a enviar el mensaje: lo ya hecho en disco se conserva."],
+            f"{type(e).__name__}: {e}\n\n{logs[-3000:]}".strip(), action="server")
 
     async def complete(self, model: str, messages: list[dict], max_tokens: int = 800) -> str:
         """Petición corta sin herramientas (para resúmenes)."""
@@ -218,3 +307,9 @@ class LLMClient:
     async def aclose(self) -> None:
         await self._http.aclose()
         await self.client.close()
+
+    async def close_when_idle(self) -> None:
+        """Cierra el cliente cuando no quede ninguna petición en curso. Cerrarlo antes cortaba la
+        respuesta que se estaba recibiendo (p. ej. al guardar la configuración a mitad de un turno)."""
+        await self._idle.wait()
+        await self.aclose()

@@ -21,8 +21,13 @@ instalarlo, elegir modelos, ajustar la memoria de la GPU y trabajar con el agent
   aun así no cabe, no llama al modelo: te explica qué ocupa el espacio y qué hacer.
 - **Errores explicados**: servidor caído, falta de VRAM, respuestas cortadas o JSON inválido se
   muestran como tarjetas con la causa y cómo arreglarlo, nunca como una traza.
-- **Ajuste al hardware**: una calculadora de VRAM lee la arquitectura real de cada modelo, y el botón
-  **Recalcular** propone contexto, KV cache y reparto GPU/RAM para tu equipo.
+- **Ajuste al hardware**: una calculadora de VRAM lee la arquitectura real de cada modelo. El botón
+  **Recalcular** decide qué modelo descargado va a cada rol, dónde corre cada uno (tu GPU, la RAM o
+  una segunda PC) y con qué contexto y KV cache.
+- **Recomendaciones al día**: **Recargar recomendaciones** busca en Hugging Face modelos nuevos para
+  programar que usan herramientas de forma nativa y caben en tu hardware.
+- **Varias conversaciones**: se guardan solas. Puedes retomarlas, renombrarlas, borrarlas, y
+  exportarlas o importarlas como archivo.
 - **Compatible con modelos MoE grandes**: los expertos que no caben en la GPU se quedan en la RAM
   sin hundir la velocidad (p. ej. un modelo de 35B en una GPU de 16 GB).
 
@@ -86,10 +91,10 @@ Si la ventana nativa no se abre, usa el modo navegador:
 
 1. **Requisitos**: comprueba que todo está en verde. Cada punto explica por qué hace falta y cómo
    arreglarlo.
-2. **Modelos**: descarga un modelo y asígnalo al rol `main`. Opcionalmente, asigna uno pequeño a
-   `fast`.
-3. **Configuración**: pulsa **Recalcular** para ajustar los parámetros a tu GPU y tu RAM. Elige la
-   carpeta del proyecto en el que vas a trabajar.
+2. **Modelos**: descarga uno o varios modelos, del catálogo o de **Recargar recomendaciones**.
+3. **Configuración**: pulsa **Recalcular**. Te propone qué modelo va a cada rol (`main`, `fast`,
+   `draft`), dónde corre cada uno y con qué parámetros. Revisa la propuesta y pulsa **Aplicar**.
+   Elige también la carpeta del proyecto en el que vas a trabajar.
 4. **Servidor**: pulsa **Arrancar**.
 5. **Chat**: pídele algo, por ejemplo *«corre los tests y arregla lo que falle»*.
 
@@ -109,6 +114,41 @@ modelos antiguos como Qwen2.5-Coder escriben las llamadas como texto. El agente 
 pero es menos fiable.
 
 Puedes añadir cualquier otro GGUF desde **Modelos → Descargar otro modelo**, o copiándolo a `models/`.
+
+### Recargar recomendaciones
+
+El catálogo es fijo. **Modelos → Recargar recomendaciones** busca modelos nuevos en la API pública de
+Hugging Face, entre los repos GGUF de unsloth, bartowski, lmstudio-community y ggml-org:
+
+- Descarta los que no llaman herramientas de forma nativa (según su plantilla de chat) y los de
+  arquitecturas que tu `llama.cpp` no sabe cargar.
+- Para cada modelo elige la cuantización que mejor equilibra calidad y velocidad **en tu hardware**.
+  Usa tu GPU, las PCs remotas de la lista y la RAM permitida según tu
+  [preferencia de cálculo](#preferencia-de-cálculo). Por defecto suma toda la VRAM como una sola.
+- Te dice dónde correría cada uno («Cabe entero en tu tarjeta gráfica», «Cabe entero en la VRAM
+  sumando la PC remota», «Usa toda tu tarjeta y deja ≈4 GB en la RAM del PC»…). Lo descargas con un
+  clic.
+- Si añades, quitas, activas o desactivas una PC remota (o la mides con «Probar»), las
+  recomendaciones se recalculan al momento con la nueva VRAM total, sin volver a consultar internet.
+
+Los resultados se guardan en `generated/recommendations.json`. Tras descargar uno, pulsa
+**Recalcular** para asignarle rol y memoria.
+
+### Qué decide Recalcular
+
+«Recalcular» usa los modelos descargados, también los que aún no están en la configuración:
+
+- **Roles**: `main` es el más capaz que corre bien aquí (tamaño, herramientas nativas y velocidad).
+  `fast` es el pequeño que mejor combina con él. Puede quedarse vacío si no compensa: entonces `main`
+  hace los resúmenes. `draft` solo se asigna si es de la misma familia y `main` no es MoE.
+- **Dónde corre cada modelo**: *Esta PC* (GPU, más RAM si hace falta), *Repartido* (con la GPU de la
+  PC remota) o *PC remota* (entero allí, deja tu GPU libre para el otro). Cómo pesa la PC remota
+  lo decide la [preferencia de cálculo](#preferencia-de-cálculo). Por defecto, su VRAM cuenta como
+  VRAM total y se usa antes que la RAM.
+- **Parámetros**: contexto, KV cache, capas en GPU, «main y fast a la vez» y tokens de salida.
+
+Mientras calcula, una ventana te va diciendo qué hace. Primero vuelve a medir la VRAM de las PCs
+remotas. Nada cambia hasta que pulsas **Aplicar**.
 
 ## Cómo funciona
 
@@ -147,7 +187,67 @@ apuntarlo a Ollama o LM Studio cambiando el *endpoint* en **Configuración**.
 | `write_file` | Crea o sobrescribe un archivo | Sí, con diff |
 | `run_command` | Ejecuta un comando de PowerShell con timeout | Sí, muestra el comando |
 
-Puedes aprobar una por una, rechazar, o elegir «Aprobar siempre» para el resto de la sesión.
+Cada petición de aprobación ofrece cuatro opciones, **por herramienta**:
+
+- **Aprobar**: solo esta vez.
+- **Rechazar**: el agente recibe la negativa y busca otra forma.
+- **Aprobar en esta sesión**: no vuelve a preguntar por esa herramienta hasta cerrar la app.
+- **Aprobar siempre**: se guarda en la configuración. Puedes quitar estos permisos uno a uno, o todos
+  a la vez, en **Configuración → Permisos permanentes**.
+
+Las herramientas MCP también piden aprobación, salvo que su servidor tenga `"autoApprove": true`.
+
+## Servidores MCP
+
+El agente puede usar herramientas externas mediante el
+[Model Context Protocol](https://modelcontextprotocol.io): bases de datos, navegadores, GitHub,
+sistemas de archivos adicionales, etc. Se configuran en **Configuración → Servidores MCP**, con el
+mismo formato que Claude Desktop o Cursor, así que puedes copiar la configuración de la
+documentación de cada servidor:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:/Documentos"]
+    },
+    "remoto": {
+      "url": "https://ejemplo.com/mcp",
+      "headers": { "Authorization": "Bearer TU_TOKEN" }
+    }
+  }
+}
+```
+
+- `command` / `args` / `env` / `cwd`: servidor local por stdio.
+- `url` / `headers`: servidor remoto por HTTP (*streamable HTTP*).
+- `"autoApprove": true`: no pedir confirmación para sus herramientas (por defecto, sí se pide).
+- `"disabled": true`: dejarlo configurado pero sin conectar.
+
+Las rutas relativas de `command` (p. ej. `bin/…`) se buscan en la carpeta del proyecto.
+
+### codebase-memory-mcp (recomendado)
+
+[codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp) construye un grafo de
+conocimiento del código (símbolos, llamadas, arquitectura) y ofrece 17 herramientas para consultarlo.
+El agente encuentra código sin leer archivos enteros, lo que ahorra mucho contexto. Es un binario
+único, 100 % local.
+
+1. Descarga `codebase-memory-mcp-windows-amd64.zip` de sus
+   [releases](https://github.com/DeusData/codebase-memory-mcp/releases) y descomprímelo en
+   `bin/codebase-memory-mcp/`. No hace falta ejecutar su `install.ps1`.
+2. Añádelo en **Configuración → Servidores MCP**:
+   ```json
+   { "mcpServers": { "codebase-memory": { "command": "bin/codebase-memory-mcp/codebase-memory-mcp.exe" } } }
+   ```
+3. Pídele al agente que indexe el proyecto («indexa este repositorio con codebase-memory»). Guarda el
+   índice en `~/.cache/codebase-memory-mcp`.
+
+Las herramientas aparecen al modelo como `mcp__<servidor>__<herramienta>`. La configuración se guarda
+en `config/mcp.json`, que no se versiona porque puede contener tokens (hay un ejemplo en
+`config/mcp.example.json`). Pulsa **Guardar y reconectar** tras cada cambio. En el CLI, los servidores
+se conectan al arrancar.
 
 ## Configuración
 
@@ -166,6 +266,69 @@ Todo se ajusta desde la GUI y se guarda en `config/models.yaml`. Lo principal:
 `generated/llama-swap.yaml` se genera automáticamente a partir de esta configuración: no lo edites a
 mano.
 
+## Usar una segunda PC
+
+Si un modelo no cabe en tu GPU, puedes sumar la GPU de otra PC de tu red. Usa el backend RPC de
+llama.cpp: en la otra PC corre `ggml-rpc-server` y el `llama-server` de esta la usa como una GPU más,
+repartiendo las capas entre las dos. La otra PC **no necesita** Python, la app ni los modelos: los pesos
+viajan por la red.
+
+```mermaid
+flowchart LR
+    Swap["llama-swap :8080"] --> Server["llama-server (main)"]
+    Server --> GPU1["GPU de esta PC"]
+    Server -->|"--rpc IP:50052 (red local)"| RPC["ggml-rpc-server"]
+    subgraph PC2["Segunda PC"]
+        RPC --> GPU2["su GPU"]
+    end
+```
+
+**En esta PC**
+
+1. **Configuración → PCs remotas → Generar paquete para la otra PC**. Crea `generated/rpc-worker.zip`
+   (≈0,6 GB) con `ggml-rpc-server.exe` y las DLL de **tu misma versión** de llama.cpp. Las dos PCs
+   tienen que usar la misma versión: si actualizas llama.cpp, vuelve a generar el paquete.
+2. Después de preparar la otra PC, pulsa **Añadir PC**, escribe su IP y pulsa **Probar**: se mide su
+   VRAM y la calculadora la tiene en cuenta.
+3. Pulsa **Recalcular** para que decida dónde va cada modelo, o elígelo tú en **Dónde corre**
+   (*Esta PC*, *Repartido con PC remota* o *PC remota*). Después pulsa **Guardar** y reinicia el
+   servidor.
+
+**En la segunda PC** (Windows con GPU NVIDIA)
+
+1. Actualiza el driver de NVIDIA.
+2. Copia el zip, descomprímelo (por ejemplo en `C:\agent-rpc`) y marca la red como **Privada**.
+3. Ejecuta `permitir-firewall.bat` **como administrador** (solo una vez). Abre el puerto 50052
+   solo para la IP de la PC principal.
+4. Abre `start-worker.bat` y deja la ventana abierta mientras uses el agente.
+5. Busca su IP con `ipconfig` («Dirección IPv4»). Te conviene reservarla en el router para que no
+   cambie.
+
+### Preferencia de cálculo
+
+En **Configuración → Preferencia de cálculo** eliges cómo reparten la memoria «Recalcular» y las
+recomendaciones. El cambio se guarda al momento; pulsa «Recalcular» para aplicarlo a tus modelos.
+
+| Preferencia | Qué hace |
+|---|---|
+| **Preferir lo local primero** | Tu tarjeta gráfica y, si no cabe, la RAM de esta PC. Las PCs remotas solo si el modelo no cabe aquí ni con la RAM. |
+| **Preferir la VRAM total** (por defecto) | Suma la VRAM de las PCs remotas a la tuya como si fuera una sola tarjeta, y la usa antes que la RAM, aunque la red sea algo más lenta. |
+| **Optimizar la velocidad** | Lo que haga responder más rápido al modelo principal, con medidas reales. Por ejemplo, un MoE va más rápido con parte en la RAM (64 tok/s) que repartido por la red (52 tok/s); un modelo denso, al revés. |
+
+En todos los casos, entre dos opciones iguales se prefiere la local. **Al añadir, quitar, activar o
+desactivar una PC** (o medirla con «Probar»), la VRAM total y los cálculos cambian al momento. La
+lista se guarda con «Guardar».
+
+> **Seguridad:** el protocolo RPC de llama.cpp no tiene contraseña ni cifrado. Úsalo solo en tu red de
+> casa y no abras el puerto en el router.
+
+- **Red**: mejor con cable Gigabit. La primera carga de un modelo manda sus pesos por la red
+  (unos 3 minutos por cada 20 GB). Las siguientes usan la caché de la otra PC (`-c`) y son mucho
+  más rápidas.
+- **Estado**: la página **Servidor** muestra si cada PC remota responde, y **Diagnóstico** la comprueba.
+- **«Probar» se queda esperando** con el servidor en marcha: la otra PC atiende a un solo cliente a la
+  vez. Para el servidor y vuelve a probar.
+
 ## Uso desde la terminal
 
 Con el servidor en marcha (arráncalo desde la GUI):
@@ -180,7 +343,45 @@ Con el servidor en marcha (arráncalo desde la GUI):
 | `-m`, `--model` | Rol o nombre del modelo (`main`, `fast`, …) |
 | `--auto` | No pedir confirmación antes de editar o ejecutar |
 
-Dentro del CLI, `/nuevo` empieza otra conversación y `/salir` termina.
+Dentro del CLI, `/nuevo` empieza otra conversación, `/deshacer` revierte los archivos que cambió el
+último turno y `/salir` termina. `--workspace` y `--auto` solo valen para esa ejecución: nunca se
+guardan en la configuración.
+
+## Red de seguridad
+
+- **Deshacer**: tras cada turno que cambia archivos aparece «Deshacer». Restaura los originales
+  (también después de reiniciar la app) y no pisa archivos que hayas editado después. Los comandos
+  ejecutados no se deshacen.
+- **Conversaciones guardadas (multichat)**: cada conversación se guarda sola tras cada turno, aunque
+  la app se cierre de golpe, y empezar una nueva nunca borra las anteriores. En la columna izquierda
+  del chat están **todas**, agrupadas por carpeta de proyecto (la actual primero). Haz clic para
+  retomar una: si es de otra carpeta, el agente cambia a esa carpeta. Usa el buscador para
+  encontrarla. Con **⋮** puedes
+  **Renombrar**, **Exportar…** (un `.json` donde elijas) o **Eliminar**. **Importar** (icono de
+  subir) carga una exportada, también desde otra PC, en la carpeta actual. Están en
+  `generated/sessions/`.
+- **Codificación**: los archivos en cp1252/latin-1 o con BOM se editan conservando su codificación.
+- **«Detener»** corta al momento un comando en curso o un modelo que se está cargando; un servidor
+  que se cuelga a mitad de respuesta se detecta a los 180 s.
+- **Registro**: `generated/logs/agent.log` (botón «Abrir carpeta de logs» en «Servidor»).
+- **Diagnóstico**: la página «Diagnóstico» revisa binarios, modelos, VRAM, servidor y MCP, y exporta
+  un .zip (sin tokens ni variables de entorno de MCP) para pedir ayuda.
+- **Modo seguro**: `agent-gui --safe` arranca sin MCP, sin modo automático y sin permisos «siempre».
+- Si `config/models.yaml` está dañado, la app arranca con valores por defecto y guarda el archivo roto
+  como `models.yaml.bak-<fecha>`.
+
+## Desarrollo
+
+```powershell
+.venv\Scripts\python -m pytest                        # rápidos (~2-3 s): lo del día a día
+.venv\Scripts\python -m pytest tests\test_loop.py -x  # un archivo, parando en el primer fallo
+.venv\Scripts\python -m pytest --lf                   # solo los que fallaron la última vez
+.venv\Scripts\python -m pytest -m "slow or not slow"  # todo, incluidos los que abren procesos
+.venv\Scripts\python -m ruff check agent tests
+```
+
+Los tests marcados `slow` arrancan PowerShell o servidores MCP reales; el CI los ejecuta siempre.
+`tests/chaos_server.py` simula un servidor que se cuelga, corta la conexión o se queda sin memoria.
 
 ## Solución de problemas
 
@@ -203,6 +404,15 @@ Qwen3.5).
 
 **«El puerto 8080 ya está en uso»**
 Hay otro llama-swap o servidor abierto. Ciérralo o cambia el puerto en Configuración.
+
+**«PC remota … no responde»**
+En la otra PC, comprueba que `start-worker.bat` sigue abierto, que la IP no ha cambiado (`ipconfig`),
+que la red es Privada y que ejecutaste `permitir-firewall.bat` como administrador. Si dice que falta
+`MSVCP140.dll`, instala el Visual C++ Redistributable:
+`winget install Microsoft.VCRedist.2015+.x64`.
+
+**«Tiene otra versión de llama.cpp»**
+Actualizaste llama.cpp en esta PC. Genera de nuevo el paquete y reemplaza la carpeta de la otra PC.
 
 **El contexto se llena en tareas largas**
 Es normal: el agente compacta solo y te avisa. Si llega al límite, te explica qué ocupa el espacio.

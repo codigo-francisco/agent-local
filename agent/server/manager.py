@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import socket
 import subprocess
@@ -12,7 +13,10 @@ import httpx
 
 from ..config import AppConfig
 from ..core.tools import kill_tree
-from . import swapconfig
+from . import rpc, swapconfig
+
+
+log = logging.getLogger("agent.server")
 
 
 class ServerError(Exception):
@@ -31,6 +35,9 @@ class ServerManager:
         self._lines: deque[str] = deque(maxlen=3000)
         self._count = 0  # líneas totales recibidas (para lecturas incrementales)
         self._lock = threading.Lock()
+        self._stopping = False
+        # Si llama-swap muere sin que lo paremos: explicación para la GUI (None = sin incidencias).
+        self.crashed: str | None = None
 
     # --- registro --------------------------------------------------------
     def _add(self, line: str) -> None:
@@ -63,6 +70,13 @@ class ServerManager:
             raise ServerError(f"El puerto {cfg.port} ya está en uso. Puede que haya otro llama-swap "
                               "o servidor abierto: ciérralo o cambia el puerto en Configuración.")
         warnings = swapconfig.write(cfg)
+        if any(swapconfig.uses_rpc(cfg, m) for m in cfg.models):
+            for w in cfg.rpc_workers:
+                if w.enabled and not rpc.reachable(w.host, w.port):
+                    warnings.append(f"La PC remota {w.endpoint} no responde: los modelos que la usan no "
+                                    "cargarán hasta que abras start-worker.bat en ella.")
+        self._stopping, self.crashed = False, None
+        log.info("Arrancando llama-swap en el puerto %s", cfg.port)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         self._add(f"$ {exe} --config {swapconfig.SWAP_FILE} --listen 127.0.0.1:{cfg.port}")
         self.proc = subprocess.Popen(
@@ -79,10 +93,16 @@ class ServerManager:
             self._add(raw.decode("utf-8", errors="replace").rstrip())
         code = proc.wait()
         self._add(f"[llama-swap terminó con código {code}]")
+        if not self._stopping and proc is self.proc:
+            self.crashed = (f"llama-swap se cerró inesperadamente (código {code}). Revisa las últimas "
+                            "líneas del registro y vuelve a arrancarlo.")
+            log.error("%s\n%s", self.crashed, self.log_tail(2000))
 
     def stop(self) -> None:
+        self._stopping, self.crashed = True, None
         if self.proc is None:
             return
+        log.info("Parando llama-swap")
         if self.proc.poll() is None:
             kill_tree(self.proc.pid)  # también mata los llama-server hijos (liberan la VRAM)
             try:

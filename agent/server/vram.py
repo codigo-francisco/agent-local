@@ -6,13 +6,17 @@ KV cache = capas × cabezas_kv × (dim_clave + dim_valor) × contexto × bytes_p
 from __future__ import annotations
 
 import ctypes
+import functools
+import json
 import os
+import re
 import subprocess
-from dataclasses import dataclass
+import threading
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
 
-from ..config import AppConfig, ModelEntry
+from ..config import GENERATED_DIR, AppConfig, ModelEntry, atomic_write
 
 GB = 1024 ** 3
 KV_BYTES = {"f16": 2.0, "q8_0": 34 / 32, "q4_0": 18 / 32}  # bloques de 32 con escala f16
@@ -54,6 +58,7 @@ class ModelEstimate:
     weights_known: bool
     note: str = ""
     offload_gb: float = 0.0  # pesos que llama.cpp deja en RAM (modo automático)
+    where: str = "local"  # local | split | remote (ver ModelEntry.placement)
 
     @property
     def total_gb(self) -> float:
@@ -70,10 +75,23 @@ class UsagePlan:
     concurrent: bool
     suggestions: list[str]
     ram_offload_gb: float = 0.0
+    ram_budget_gb: float | None = None  # RAM que se permite usar (ram_limit_pct de la total)
+    remote_gb: float = 0.0  # VRAM de PCs remotas sumada a capacity_gb (modelos «repartidos»)
+    remote_used_gb: float = 0.0  # lo que ocupan en las PCs remotas los modelos que van enteros allí
+    remote_capacity_gb: float = 0.0  # VRAM utilizable medida en las PCs remotas
+
+    @property
+    def ram_ok(self) -> bool:
+        return self.ram_budget_gb is None or self.ram_offload_gb <= self.ram_budget_gb
+
+    @property
+    def remote_ok(self) -> bool:
+        return self.remote_used_gb <= self.remote_capacity_gb + 1e-6 or not self.remote_capacity_gb
 
     @property
     def fits(self) -> bool | None:
-        return None if self.capacity_gb is None else self.total_gb <= self.capacity_gb
+        return None if self.capacity_gb is None else \
+            self.total_gb <= self.capacity_gb and self.ram_ok and self.remote_ok
 
 
 def kv_cache_bytes(arch: ArchInfo, ctx: int, kv_type: str) -> float:
@@ -112,7 +130,61 @@ def _field(reader, key: str):
         return vals[0] if len(vals) == 1 else vals
 
 
+# --- caché en disco de metadatos GGUF ----------------------------------------
+# GGUFReader recorre todo el vocabulario: ~5 s por modelo. Sin caché en disco se repetía en cada
+# arranque y congelaba la interfaz al pintar la calculadora de VRAM.
+GGUF_CACHE_FILE = GENERATED_DIR / "gguf-cache.json"
+_disk_cache: dict | None = None
+_disk_lock = threading.Lock()
+
+
+def _load_disk() -> dict:
+    global _disk_cache
+    if _disk_cache is None:
+        try:
+            data = json.loads(GGUF_CACHE_FILE.read_text(encoding="utf-8"))
+            _disk_cache = data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            _disk_cache = {}
+    return _disk_cache
+
+
+def _persistent(kind: str, dump=lambda v: v, load=lambda v: v):
+    """Cachea en disco el resultado de leer un .gguf; la clave incluye tamaño y fecha, así un
+    archivo re-descargado se vuelve a leer. Los fallos no se cachean (descarga a medias)."""
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(path: str, mtime: float):
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                size = -1
+            key = f"{kind}|{path}|{size}|{mtime}"
+            with _disk_lock:
+                cache = _load_disk()
+                if key in cache:
+                    try:
+                        return load(cache[key])
+                    except (TypeError, ValueError):
+                        pass  # formato antiguo: se vuelve a leer
+            value = fn(path, mtime)
+            if value:
+                with _disk_lock:
+                    cache = _load_disk()
+                    cache[key] = dump(value)
+                    for old in list(cache)[:-200]:  # que no crezca sin límite
+                        del cache[old]
+                    try:
+                        atomic_write(GGUF_CACHE_FILE, json.dumps(cache).encode("utf-8"))
+                    except OSError:
+                        pass
+            return value
+        return wrapper
+    return deco
+
+
 @lru_cache(maxsize=32)
+@_persistent("arch", asdict, lambda v: ArchInfo(**v))
 def _read_arch_cached(path: str, mtime: float) -> ArchInfo | None:  # noqa: ARG001 - mtime invalida la caché
     try:
         from gguf import GGUFReader
@@ -145,6 +217,7 @@ def read_gguf_arch(path: Path) -> ArchInfo | None:
 
 
 @lru_cache(maxsize=32)
+@_persistent("tokenizer", list, tuple)
 def _tokenizer_cached(path: str, mtime: float) -> tuple | None:  # noqa: ARG001
     try:
         from gguf import GGUFReader
@@ -159,7 +232,13 @@ def _tokenizer_cached(path: str, mtime: float) -> tuple | None:  # noqa: ARG001
 THINKING_MARKERS = ("<think>", "reasoning_content", "enable_thinking", "<|channel|>")
 
 
+def template_uses_tools(template: str) -> bool:
+    """La plantilla de chat sabe recibir herramientas: el modelo las llama de forma nativa."""
+    return isinstance(template, str) and re.search(r"\btools\b", template) is not None
+
+
 @lru_cache(maxsize=32)
+@_persistent("meta2")
 def _meta_cached(path: str, mtime: float) -> dict:  # noqa: ARG001
     try:
         from gguf import GGUFReader
@@ -167,13 +246,15 @@ def _meta_cached(path: str, mtime: float) -> dict:  # noqa: ARG001
         arch = _field(r, "general.architecture")
         template = _field(r, "tokenizer.chat_template") or ""
         return {"context_length": _field(r, f"{arch}.context_length"),
-                "thinking": isinstance(template, str) and any(m in template for m in THINKING_MARKERS)}
+                "thinking": isinstance(template, str) and any(m in template for m in THINKING_MARKERS),
+                "tools": template_uses_tools(template), "architecture": str(arch or "")}
     except Exception:  # noqa: BLE001
         return {}
 
 
 def model_meta(path: Path) -> dict:
-    """{'context_length': contexto de entrenamiento, 'thinking': si el modelo razona antes de responder}."""
+    """{'context_length': contexto de entrenamiento, 'thinking': si razona antes de responder,
+    'tools': si usa herramientas de forma nativa, 'architecture': arquitectura de llama.cpp}."""
     if not path.is_file():
         return {}
     return _meta_cached(str(path), path.stat().st_mtime)
@@ -225,9 +306,9 @@ def estimate_entry(entry: ModelEntry, catalog: list[dict], ctx: int | None = Non
         kv = kv_cache_bytes(arch, ctx, kv_type) / GB
     else:  # sin datos de arquitectura: aproximación conservadora
         kv = weights * 0.05 * (ctx / 4096) * KV_BYTES.get(kv_type, 2.0) / 2
-        note = "arquitectura desconocida: KV aproximada"
+        note = "no pude leer su estructura: la memoria de la conversación es aproximada"
     if not weights_known and not item:
-        note = "archivo no descargado y fuera del catálogo: tamaño desconocido"
+        note = "no está descargado ni en el catálogo: no sé cuánto ocupa"
     return ModelEstimate(entry.name, weights, kv, OVERHEAD_GB, arch is not None, weights_known, note)
 
 
@@ -242,20 +323,43 @@ def plan_usage(cfg: AppConfig, catalog: list[dict], gpu: GPUInfo | None = None) 
             d = estimate_entry(draft, catalog, ctx=main.ctx, kv_type=main.kv_type)
             e.weights_gb += d.weights_gb
             e.kv_gb += d.kv_gb
-            e.note = (e.note + "; " if e.note else "") + f"incluye borrador {draft.name}"
+            e.note = (e.note + "; " if e.note else "") + f"incluye el modelo borrador {draft.name}, que acelera las respuestas"
         ests.append(e)
     if fast and fast is not main:
         ests.append(estimate_entry(fast, catalog))
     concurrent = cfg.keep_loaded
+    remote_on = bool(cfg.rpc_endpoints())
+    for e in ests:
+        entry = cfg.model(e.name)
+        e.where = entry.placement if remote_on and entry and entry.rpc else "local"
+    local_ests = [e for e in ests if e.where != "remote"]
+    remote_ests = [e for e in ests if e.where == "remote"]
 
     def gpu_total() -> float:
-        return sum(e.total_gb for e in ests) if concurrent else max((e.total_gb for e in ests), default=0)
+        return sum(e.total_gb for e in local_ests) if concurrent else \
+            max((e.total_gb for e in local_ests), default=0)
 
     total = gpu_total()
-    capacity = gpu.total_gb - DESKTOP_RESERVE_GB if gpu else None
+    remote_avail = remote_capacity_gb(cfg)
+    remote_used = sum(e.total_gb for e in remote_ests) if concurrent else \
+        max((e.total_gb for e in remote_ests), default=0)
+    split = any(e.where == "split" for e in local_ests)
+    remote = max(0.0, remote_avail - remote_used) if split else 0.0
+    capacity = gpu.total_gb - DESKTOP_RESERVE_GB + remote if gpu else None
     suggestions: list[str] = []
+    if capacity is not None and total > capacity and main and not main.rpc and remote_avail > 0:
+        suggestions.append(f"Tienes ≈{remote_avail:.0f} GB de VRAM en las PCs remotas sin usar. Pulsa "
+                           f"«Recalcular», o pon «{main.name}» en «Repartido con PC remota», para sumarlos "
+                           "y no tener que usar (tanto) la RAM.")
+    elif remote_on and any(e.where != "local" for e in ests) and not remote_avail:
+        suggestions.append("Aún no sé cuánta VRAM tiene la PC remota: pulsa «Probar» en «PCs remotas» "
+                           "para medirla. Hasta entonces no la sumo.")
+    if remote_avail and remote_used > remote_avail:
+        suggestions.append(f"Lo que mandas entero a la PC remota necesita ≈{remote_used:.1f} GB y allí solo "
+                           f"hay ≈{remote_avail:.1f} GB: baja su contexto o déjalo en esta PC.")
     ram_offload = 0.0
-    if capacity is not None and total > capacity and main and main.gpu_layers < 0:
+    if capacity is not None and total > capacity and main and main.gpu_layers < 0 \
+            and ests[0].where != "remote":
         # Modo automático: llama.cpp (--fit) deja en RAM lo que no quepa en la GPU.
         e = ests[0]
         arch = read_gguf_arch(main.path) or arch_from_catalog(catalog_entry(catalog, main.file))
@@ -263,34 +367,54 @@ def plan_usage(cfg: AppConfig, catalog: list[dict], gpu: GPUInfo | None = None) 
         total = gpu_total()
         if arch and arch.moe:
             e.note = (e.note + "; " if e.note else "") + \
-                f"≈{ram_offload:.1f} GB de expertos MoE en RAM (automático, algo más lento)"
+                ("es un modelo MoE: en cada palabra solo usa una parte, así que tener parte en la RAM "
+                 "lo hace algo más lento, no mucho")
         else:
             e.note = (e.note + "; " if e.note else "") + \
-                f"≈{ram_offload:.1f} GB de capas en RAM: MUCHO más lento"
-            suggestions.append(f"«{main.name}» no es MoE: con capas en la RAM irá muy lento. Mejor un "
-                               "modelo o una cuantización más pequeños.")
-        ram = ram_total_gb()
-        if ram and ram_offload > ram * 0.6:
-            suggestions.append(f"Irían ≈{ram_offload:.0f} GB a la RAM y tienes {ram:.0f} GB: el sistema "
-                               "puede quedarse sin memoria. Usa una cuantización más pequeña.")
-    elif capacity is not None and total > capacity and main:
-        others = sum(e.total_gb for e in ests[1:]) if concurrent else 0
+                "no es un modelo MoE: con parte en la RAM irá MUCHO más lento"
+            suggestions.append(f"«{main.name}» no cabe en la VRAM y, al no ser MoE, con parte en la RAM irá "
+                               "muy lento. Mejor un modelo más pequeño o una versión más comprimida "
+                               "(cuantización más baja).")
+        budget = ram_budget_gb(cfg)
+        if budget is not None and ram_offload > budget:
+            suggestions.append(f"Harían falta ≈{ram_offload:.0f} GB de RAM y has permitido {budget:.0f} GB "
+                               f"({cfg.ram_limit_pct}% de los {ram_total_gb():.0f} GB del PC): el PC puede "
+                               "quedarse sin memoria. Usa una versión más comprimida del modelo o sube "
+                               "el límite de RAM más abajo.")
+    elif capacity is not None and total > capacity and main and ests[0].where != "remote":
+        others = sum(e.total_gb for e in local_ests[1:]) if concurrent else 0
         arch = read_gguf_arch(main.path) or arch_from_catalog(catalog_entry(catalog, main.file))
         if arch:
             free_for_kv = capacity - others - ests[0].weights_gb - ests[0].overhead_gb
             per_token = kv_cache_bytes(arch, 1, main.kv_type) / GB
             max_ctx = int(free_for_kv / per_token) // 1024 * 1024 if per_token and free_for_kv > 0 else 0
             if max_ctx >= 2048:
-                suggestions.append(f"Con esta configuración, el contexto máximo de «{main.name}» que "
-                                   f"cabe es ≈{max_ctx // 1024}K tokens.")
+                suggestions.append(f"Baja el contexto de «{main.name}»: con esta VRAM caben unos "
+                                   f"{max_ctx // 1024}K tokens de conversación.")
         if main.kv_type == "f16":
-            suggestions.append("Usa KV cache q8_0: ocupa la mitad y apenas afecta a la calidad.")
+            suggestions.append("Pon «KV cache» en q8_0: la conversación ocupa la mitad y la calidad "
+                               "apenas cambia.")
         if concurrent and len(ests) > 1:
-            suggestions.append("Desactiva «mantener main y fast cargados»: se turnarán en la GPU "
-                               "(más lento al cambiar, pero cabe).")
-        suggestions.append("Elige una cuantización más pequeña del modelo (p. ej. Q4_K_S o Q3_K_M) "
-                           "o un modelo con menos parámetros.")
-    return UsagePlan(ests, total, capacity, gpu, concurrent, suggestions, ram_offload)
+            suggestions.append("Desactiva «Mantener main y fast cargados a la vez»: se turnarán en la "
+                               "VRAM (hay una espera al cambiar, pero cabe).")
+        suggestions.append("O usa una versión más comprimida del modelo (cuantización Q4_K_S o Q3_K_M) "
+                           "o un modelo más pequeño.")
+    return UsagePlan(ests, total, capacity, gpu, concurrent, suggestions, ram_offload,
+                     ram_budget_gb(cfg), remote, remote_used, remote_avail)
+
+
+def remote_capacity_gb(cfg: AppConfig) -> float:
+    """VRAM utilizable de las PCs remotas de la lista (activas y ya medidas con «Probar»): cada una
+    reserva lo de su escritorio y el contexto CUDA / buffers de cómputo de su parte del modelo. Se
+    suma a la de esta PC como VRAM total (llama.cpp reparte las capas entre todas)."""
+    return sum(max(0.0, w.vram_gb - DESKTOP_RESERVE_GB - OVERHEAD_GB)
+               for w in cfg.rpc_workers if w.enabled and w.host and w.vram_gb > 0)
+
+
+def ram_budget_gb(cfg: AppConfig, ram: float | None = None) -> float | None:
+    """RAM que pueden ocupar los modelos: `ram_limit_pct` (90 % por defecto) de la RAM total."""
+    ram = ram if ram is not None else ram_total_gb()
+    return ram * cfg.ram_limit_pct / 100 if ram else None
 
 
 def ram_total_gb() -> float | None:
